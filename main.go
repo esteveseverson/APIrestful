@@ -1,11 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
+
+	_ "github.com/go-sql-driver/mysql"
 )
 
 type Pessoa struct {
@@ -13,8 +16,8 @@ type Pessoa struct {
 	Nome string `json:"nome"`
 }
 
-var pessoas []Pessoa
-var nextID int = 1
+// docker run --name restApi -e MYSQL_ROOT_PASSWORD=test123 -d mysql:8
+var db *sql.DB
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	switch {
@@ -32,55 +35,105 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func getPessoas(w http.ResponseWriter, r *http.Request) {
+
+	rows, err := db.Query("SELECT id, nome FROM pessoas")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var pessoas []Pessoa
+	for rows.Next() {
+		var p Pessoa
+		if err := rows.Scan(&p.ID, &p.Nome); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		pessoas = append(pessoas, p)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(pessoas)
+
 }
 
 func getPessoaByID(w http.ResponseWriter, r *http.Request) {
-	idStr := regexp.MustCompile(`\d+`).FindString(r.URL.Path)
-	id, _ := strconv.Atoi(idStr)
 
-	for _, p := range pessoas {
-		if p.ID == id {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(p)
-			return
-		}
+	idStr := regexp.MustCompile(`\d+`).FindString(r.URL.Path)
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "ID inválido", http.StatusBadRequest)
+		return
 	}
+
+	var p Pessoa
+	err = db.QueryRow("SELECT id, nome FROM pessoas WHERE id = ?", id).Scan(&p.ID, &p.Nome)
+	if err == sql.ErrNoRows {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(nil)
+		return
+	} else if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(nil)
 }
 
 func createPessoa(w http.ResponseWriter, r *http.Request) {
+
 	var p Pessoa
 	err := json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	p.ID = nextID
-	nextID++
-	pessoas = append(pessoas, p)
+
+	result, err := db.Exec("INSERT INTO pessoas (nome) VALUES (?)", p.Nome)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+	p.ID = int(id)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(p)
 }
 
 func deletePessoaByID(w http.ResponseWriter, r *http.Request) {
-	idStr := regexp.MustCompile(`\d+`).FindString(r.URL.Path)
-	id, _ := strconv.Atoi(idStr)
 
-	newPessoas := pessoas[:0]
-	for _, p := range pessoas {
-		if p.ID != id {
-			newPessoas = append(newPessoas, p)
-		}
+	idStr := regexp.MustCompile(`\d+`).FindString(r.URL.Path)
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "ID inválido", http.StatusBadRequest)
+		return
 	}
-	pessoas = newPessoas
+
+	_, err = db.Exec("DELETE FROM pessoas WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(pessoas)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Pessoa deletada com sucesso"})
 }
 
 func main() {
+
+	var err error
+	db, err = sql.Open("mysql", "root:test123@tcp(localhost:3306)/api_db")
+	if err != nil {
+		fmt.Println("Erro ao conectar ao banco de dados:", err)
+		panic(err)
+	}
+	defer db.Close()
 
 	http.HandleFunc("/", handler)
 	fmt.Println("Servidor rodando na porta 8080")
